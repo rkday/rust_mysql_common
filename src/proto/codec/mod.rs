@@ -8,22 +8,31 @@
 
 //! MySql protocol codec implementation.
 
+#[cfg(feature = "compress")]
 pub use flate2::Compression;
 
 use byteorder::{ByteOrder, LittleEndian};
 use bytes::{Buf, BufMut, BytesMut};
+#[cfg(feature = "compress")]
 use flate2::read::{ZlibDecoder, ZlibEncoder};
 
 use std::{
     cmp::{max, min},
+    num::NonZeroUsize,
+};
+
+#[cfg(feature = "compress")]
+use std::{
     io::Read,
     mem,
-    num::NonZeroUsize,
     ptr::slice_from_raw_parts_mut,
 };
 
+
 use self::error::PacketCodecError;
-use crate::constants::{DEFAULT_MAX_ALLOWED_PACKET, MAX_PAYLOAD_LEN, MIN_COMPRESS_LENGTH};
+use crate::constants::{DEFAULT_MAX_ALLOWED_PACKET, MAX_PAYLOAD_LEN};
+#[cfg(feature = "compress")]
+use crate::constants::MIN_COMPRESS_LENGTH;
 
 pub mod error;
 
@@ -60,6 +69,7 @@ pub fn packet_to_chunks<T: Buf>(mut seq_id: u8, packet: &mut T, dst: &mut BytesM
 /// Will compress all data from `src` to `dst`.
 ///
 /// Compressed packets will start with given `seq_id`. Resulting sequence id will be returned.
+#[cfg(feature = "compress")]
 pub fn compress(
     mut seq_id: u8,
     compression: Compression,
@@ -230,6 +240,7 @@ impl Default for ChunkDecoder {
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum CompData {
     /// Compressed(<needed>, <uncompressed len>)
+    #[cfg(feature = "compress")]
     Compressed(NonZeroUsize, NonZeroUsize),
     /// Uncompressed(<needed>)
     Uncompressed(NonZeroUsize),
@@ -251,21 +262,26 @@ impl CompData {
         let uncompressed_len = NonZeroUsize::new(uncompressed_len);
 
         match (compressed_len, uncompressed_len) {
-            (Some(needed), Some(plain_len)) => Ok(Some(CompData::Compressed(needed, plain_len))),
             (Some(needed), None) => Ok(Some(CompData::Uncompressed(needed))),
-            (None, Some(_)) => {
+            (None, None) => Ok(None),
+            #[cfg(feature = "compress")]
+            (Some(needed), Some(plain_len)) => Ok(Some(CompData::Compressed(needed, plain_len))),
+            (_, _) => {
                 // Zero bytes of compressed data that stores
-                // non-zero bytes of plain data? Absurd.
+                // non-zero bytes of plain data, or compressed data when the compression feature is
+                // disabled.
                 Err(PacketCodecError::BadCompressedPacketHeader)
             }
-            (None, None) => Ok(None),
         }
     }
 
     /// Returns number of bytes needed to decode packet.
     fn needed(&self) -> usize {
         match *self {
+            #[cfg(feature = "compress")]
             CompData::Compressed(needed, _) | CompData::Uncompressed(needed) => needed.get(),
+            #[cfg(not(feature = "compress"))]
+            CompData::Uncompressed(needed) => needed.get(),
         }
     }
 }
@@ -323,6 +339,7 @@ impl CompDecoder {
                         CompData::Uncompressed(needed) => {
                             dst.extend_from_slice(&src[..needed.get()]);
                         }
+                        #[cfg(feature = "compress")]
                         CompData::Compressed(needed, plain_len) => {
                             dst.reserve(plain_len.get());
                             unsafe {
@@ -370,6 +387,7 @@ impl PacketCodec {
     }
 
     /// Turns compression on.
+    #[cfg(feature = "compress")]
     pub fn compress(&mut self, level: Compression) {
         self.inner.compress(level);
     }
@@ -413,6 +431,7 @@ enum PacketCodecInner {
     /// Plain packet codec.
     Plain(PlainPacketCodec),
     /// Compressed packet codec.
+    #[cfg(feature = "compress")]
     Comp(CompPacketCodec),
 }
 
@@ -421,6 +440,7 @@ impl PacketCodecInner {
     fn reset_seq_id(&mut self) {
         match self {
             PacketCodecInner::Plain(c) => c.reset_seq_id(),
+            #[cfg(feature = "compress")]
             PacketCodecInner::Comp(c) => c.reset_seq_id(),
         }
     }
@@ -429,11 +449,13 @@ impl PacketCodecInner {
     fn sync_seq_id(&mut self) {
         match self {
             PacketCodecInner::Plain(_) => (),
+            #[cfg(feature = "compress")]
             PacketCodecInner::Comp(c) => c.sync_seq_id(),
         }
     }
 
     /// Turns compression on.
+    #[cfg(feature = "compress")]
     fn compress(&mut self, level: Compression) {
         match self {
             PacketCodecInner::Plain(c) => {
@@ -446,6 +468,7 @@ impl PacketCodecInner {
                     plain_codec: mem::take(c),
                 })
             }
+            #[cfg(feature = "compress")]
             PacketCodecInner::Comp(c) => c.level = level,
         }
     }
@@ -465,6 +488,7 @@ impl PacketCodecInner {
     {
         match self {
             PacketCodecInner::Plain(codec) => codec.decode(src, dst, max_allowed_packet),
+            #[cfg(feature = "compress")]
             PacketCodecInner::Comp(codec) => codec.decode(src, dst, max_allowed_packet),
         }
     }
@@ -478,6 +502,7 @@ impl PacketCodecInner {
     ) -> Result<(), PacketCodecError> {
         match self {
             PacketCodecInner::Plain(codec) => codec.encode(packet, dst, max_allowed_packet),
+            #[cfg(feature = "compress")]
             PacketCodecInner::Comp(codec) => codec.encode(packet, dst, max_allowed_packet),
         }
     }
@@ -558,6 +583,7 @@ impl PlainPacketCodec {
 }
 
 /// Codec for compressed MySql protocol.
+#[cfg(feature = "compress")]
 #[derive(Debug)]
 struct CompPacketCodec {
     /// Compression level for this codec.
@@ -574,6 +600,7 @@ struct CompPacketCodec {
     plain_codec: PlainPacketCodec,
 }
 
+#[cfg(feature = "compress")]
 impl CompPacketCodec {
     /// Sets sequence id to `0`.
     fn reset_seq_id(&mut self) {
