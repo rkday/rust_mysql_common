@@ -44,5 +44,5 @@ proptest = "0.9.2"
 debug = true
 
 [features]
-default = ["flate2/zlib"]
+default = ["flate2/rust_backend"]
 nightly = []
